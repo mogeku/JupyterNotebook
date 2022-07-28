@@ -1,5 +1,6 @@
 import os
 import math
+import enum
 from construct import *
 from bitstream import BitStream
 from numpy import uint8
@@ -56,13 +57,15 @@ class MyBitStream(BitStream):
 
 
 class NALU_Payload:
-    def __init__(self, data, bit_len, type_name):
+    def __init__(self, nal_header, data, bit_len, type_name):
         self.stream = MyBitStream(data, bit_len)
         self.type = type_name
+        self.nal_unit_type = nal_header.nal_unit_type
+        self.nal_ref_idc = nal_header.nal_ref_idc
 
     def __str__(self):
         ret = f"{self.type} info:\n"
-        skip_list = ["stream"]
+        skip_list = ["stream", "sps_list", "pps_list"]
         for key, value in self.__dict__.items():
             if key in skip_list:
                 continue
@@ -75,10 +78,39 @@ class NALU_Payload:
     def scaling_list(self):
         pass
 
+    def ref_pic_list_mvc_modification(self):
+        pass
+
+    def ref_pic_list_modification(self):
+        pass
+
+    def pred_weight_table(self):
+        pass
+
+    def dec_ref_pic_marking(self):
+        if self.IdrPicFlag:
+            self.no_output_of_prior_pics_flag = self.stream.read_bit()
+            self.long_term_reference_flag = self.stream.read_bit()
+        else:
+            self.adaptive_ref_pic_marking_mode_flag = self.stream.read_bit()
+            if self.adaptive_ref_pic_marking_mode_flag:
+                while True:
+                    self.memory_management_control_operation = self.stream.read_ue()
+                    if self.memory_management_control_operation in [1, 3]:
+                        self.difference_of_pic_nums_minus1 = self.stream.read_ue()
+                    if self.memory_management_control_operation == 2:
+                        self.long_term_pic_num = self.stream.read_ue()
+                    if self.memory_management_control_operation in [3, 6]:
+                        self.long_term_frame_idx = self.stream.read_ue()
+                    if self.memory_management_control_control == 4:
+                        self.max_long_term_frame_idx_plus1 = self.stream.read_ue()
+                    if self.memory_management_control_operation == 0:
+                        break
+
 
 class SPS(NALU_Payload):
-    def __init__(self, data, bit_len):
-        super().__init__(data, bit_len, "Sequence parameter set")
+    def __init__(self, nal_header, data, bit_len):
+        super().__init__(nal_header, data, bit_len, "Sequence parameter set")
 
         # 参考下面 itu 标准中的 7.3.2.1.1  Sequence parameter set data syntax 进行解析
         # https://www.itu.int/rec/dologin_pub.asp?lang=e&id=T-REC-H.264-201304-S!!PDF-E&type=items
@@ -96,6 +128,7 @@ class SPS(NALU_Payload):
         if self.profile_idc in [100, 110, 122, 244, 44, 83, 86, 118, 128, 138]:
             # 0: 单色, 1: YUV 4:2:0, 2: YUV 4:2:2, 3: YUV 4:4:4 (默认值为 1)
             self.chroma_format_idc = self.stream.read_ue()
+            self.separate_colour_plane_flag = 0
             if self.chroma_format_idc == 3:
                 # 是否将 UV 分量独立出来, 变成 YYY UUU VVV 的存储方式
                 self.separate_colour_plane_flag = self.stream.read_bit()
@@ -198,8 +231,8 @@ class SPS(NALU_Payload):
 
 
 class PPS(NALU_Payload):
-    def __init__(self, data, bit_len, sps:SPS):
-        super().__init__(data, bit_len, "Picture parameter set")
+    def __init__(self, nal_header, data, bit_len, sps_list):
+        super().__init__(nal_header, data, bit_len, "Picture parameter set")
 
         self.pic_parameter_set_id = self.stream.read_ue()
         self.seq_parameter_set_id = self.stream.read_ue()
@@ -221,8 +254,10 @@ class PPS(NALU_Payload):
             elif self.slice_group_map_type in [3, 4, 5]:
                 self.slice_group_change_direction_flag = self.stream.read_bit()
                 self.slice_group_change_rate_minus1 = self.stream.read_ue()
+                self.SliceGroupChangeRate = self.slice_group_change_rate_minus1 + 1
             elif self.slice_group_map_type == 6:
                 self.pic_size_in_map_units_minus1 = self.stream.read_ue()
+                self.PicSizeInMapUnits = self.pic_size_in_map_units_minus1 + 1
                 self.slice_group_id = []
                 for i in range(self.num_slice_groups_minus1):
                     self.slice_group_id.append(
@@ -245,7 +280,15 @@ class PPS(NALU_Payload):
             self.pic_scaling_matrix_present_flag = self.stream.read_bit()
             if self.pic_scaling_matrix_present_flag:
                 self.pic_scaling_list_present_flag = []
-                for i in range(6 + (2 if sps.chroma_format_idc != 3 else 6) * self.transform_8x8_mode_flag):
+                for i in range(
+                    6
+                    + (
+                        2
+                        if sps_list[self.seq_parameter_set_id].chroma_format_idc != 3
+                        else 6
+                    )
+                    * self.transform_8x8_mode_flag
+                ):
                     self.pic_scaling_list_present_flag.append(self.stream.read_bit())
                     if self.pic_scaling_list_present_flag[i]:
                         if i < 6:
@@ -253,6 +296,123 @@ class PPS(NALU_Payload):
                         else:
                             self.scaling_list()
             self.second_chroma_qp_index_offset = self.stream.read_se()
+
+
+class AUD(NALU_Payload):
+    def __init__(self, nal_header, data, bit_len):
+        super().__init__(nal_header, data, bit_len, "Access unit delimiter")
+
+        # 指定 slice_type 可能的值
+        # 参考 itu 标准中的 Table 7-5 - Meaning of primary_pic_type
+        self.primary_pic_type = self.stream.read_nbit(3)
+
+
+class Slice(NALU_Payload):
+    def __init__(self, nal_header, data, bit_len, type_name, sps_list, pps_list):
+        super().__init__(nal_header, data, bit_len, type_name)
+        self.sps_list = sps_list
+        self.pps_list = pps_list
+        self.IdrPicFlag = self.nal_unit_type == 5
+
+    def slice_header(self):
+        self.first_mb_in_slice = self.stream.read_ue()
+        self.slice_type = self.stream.read_ue()
+        self.pic_parameter_set_id = self.stream.read_ue()
+        pps: PPS = self.pps_list[self.pic_parameter_set_id]
+        sps: SPS = self.sps_list[pps.seq_parameter_set_id]
+        if sps.separate_colour_plane_flag == 1:
+            self.colour_plane_id = self.stream.read_nbit(2)
+        self.frame_num = self.stream.read_nbit(sps.log2_max_frame_num_minus4 + 4)
+        # 判断是否为场编码
+        if not sps.frame_mbs_only_flag:
+            self.field_pic_flag = self.stream.read_bit()
+            if self.field_pic_flag:
+                # 判断是底场还是顶场
+                self.bottom_field_flag = self.stream.read_bit()
+        if self.IdrPicFlag:
+            self.idr_pic_id = self.stream.read_ue()
+        if sps.pic_order_cnt_type == 0:
+            self.pic_order_cnt_lsb = self.stream.read_nbit(
+                sps.log2_max_pic_order_cnt_lsb_minus4 + 4
+            )
+            if (
+                pps.bottom_field_pic_order_in_frame_present_flag
+                and not self.field_pic_flag
+            ):
+                self.delta_pic_order_cnt_bottom = self.stream.read_se()
+
+        self.delta_pic_order_cnt = []
+        if sps.pic_order_cnt_type == 1 and not sps.delta_pic_order_always_zero_flag:
+            self.delta_pic_order_cnt.append(self.stream.read_se())
+            if (
+                pps.bottom_field_pic_order_in_frame_present_flag
+                and not self.field_pic_flag
+            ):
+                self.delta_pic_order_cnt.append(self.stream.read_se())
+        if pps.redundant_pic_cnt_present_flag:
+            self.redundant_pic_cnt = self.stream.read_ue()
+        if self.slice_type % 5 == 1:  # B帧
+            self.direct_spatial_mv_pred_flag = self.stream.read_bit()
+        if self.slice_type % 5 in [0, 3, 1]:  # P帧, SP帧, B帧
+            self.num_ref_idx_active_override_flag = self.stream.read_bit()
+            if self.num_ref_idx_active_override_flag:
+                self.num_ref_idx_l0_active_minus1 = self.stream.read_ue()
+                if self.slice_type % 5 == 1:  # B帧
+                    self.num_ref_idx_l1_active_minus1 = self.stream.read_ue()
+        if self.nal_unit_type in [20, 21]:
+            self.ref_pic_list_mvc_modification()  # specified in AnnexH
+        else:
+            self.ref_pic_list_modification()
+        if pps.weighted_pred_flag and (
+            self.slice_type % 5 in [0, 3]
+            or pps.weighted_bipred_idc == 1
+            and self.slice_type % 5 == 1
+        ):
+            self.pred_weight_table()
+        if self.nal_ref_idc != 0:
+            self.dec_ref_pic_marking()
+        if pps.entropy_coding_mode_flag and self.slice_type % 5 not in [2, 4]:
+            self.cabac_init_idc = self.stream.read_ue()
+        self.slice_qp_delta = self.stream.read_se()
+        if self.slice_type % 5 in [3, 4]:  # SP, SI
+            if self.slice_type % 5 == 3:  # SP
+                self.sp_for_switch_flag = self.stream.read_bit()
+            self.slice_qs_delta = self.stream.read_se()
+        if pps.deblocking_filter_control_present_flag:
+            self.disable_deblocking_filter_idc = self.stream.read_ue()
+            if self.disable_deblocking_filter_idc != 1:
+                self.slice_alpha_c0_offset_div2 = self.stream.read_se()
+                self.slice_beta_offset_div2 = self.stream.read_se()
+        if pps.num_slice_groups_minus1 > 0 and pps.slice_group_map_type in range(3, 6):
+            self.slice_group_change_cycle = self.stream.read_nbit(
+                math.ceil(
+                    math.log2(pps.PicSizeInMapUnits / pps.SliceGroupChangeRate + 1)
+                )
+            )
+        # if self.nal_unit_type == 21 and self.slice_type %5 not in [2, 4]: #该情况暂时不处理了
+        # if self.DepthFlag:
+        # self.depth_weighted_pred_flag = self.stream.read_bit()
+
+
+class IDR(Slice):
+    def __init__(self, nal_header, data, bit_len, sps_list, pps_list):
+        super().__init__(nal_header, data, bit_len, "IDR", sps_list, pps_list)
+        self.slice_header()
+
+
+class NALU_TYPE(enum.IntEnum):
+    non_IDR = (1,)
+    coded_slice_data_partition_a = (2,)
+    coded_slice_data_partition_b = (3,)
+    coded_slice_data_partition_c = (4,)
+    IDR = (5,)
+    SEI = (6,)
+    SPS = (7,)
+    PPS = (8,)
+    AUD = (9,)
+    end_of_seq = (10,)
+    end_of_stream = (11,)
+    filler_data = (12,)
 
 
 class NALU:
@@ -263,28 +423,14 @@ class NALU:
             / BitStruct(
                 "forbidden_zero_bit" / Flag,
                 "nal_ref_idc" / BitsInteger(2),
-                "nal_unit_type"
-                / Enum(
-                    BitsInteger(5),
-                    non_IDR=1,
-                    coded_slice_data_partition_a=2,
-                    coded_slice_data_partition_b=3,
-                    coded_slice_data_partition_c=4,
-                    IDR=5,
-                    SEI=6,
-                    SPS=7,
-                    PPS=8,
-                    access_unit_delimiter=9,
-                    end_of_seq=10,
-                    end_of_stream=11,
-                    filler_data=12,
-                ),
+                "nal_unit_type" / BitsInteger(5),
             ),
             "payload" / GreedyBytes,
         )
 
         self.info = self.fmt.parse(self.data)
-        self.type = self.info.header.nal_unit_type
+        self.header = self.info.header
+        self.type = NALU_TYPE(self.header.nal_unit_type)
         self.ebsp = self.info.payload
         # 去除防竞争字节 0x03
         self.rbsp = self.ebsp.replace(b"\x00\x00\x03", b"\x00\x00")
@@ -292,7 +438,7 @@ class NALU:
         self.sodb_bit_len = self._get_sodb_bit_len()
 
     def __str__(self):
-        return self.info.__str__()
+        return f"{self.type.__str__()} {self.info.__str__()}\n"
 
     def _get_sodb_bit_len(self):
         # 获取补齐的bit数
@@ -313,8 +459,8 @@ class H264:
             self.data = f.read()
         self.cur_offset = 0
         self.start_code = [b"\x00\x00\x01", b"\x00\x00\x00\x01"]
-        self.sps = None
-        self.pps = None
+        self.sps_list = {}
+        self.pps_list = {}
 
     def _read_nalu(self):
         data = self.data[self.cur_offset :]
@@ -346,15 +492,29 @@ class H264:
             print(nalu)
 
             payload = None
-            print(nalu.info.header)
-            if nalu.type == "SPS":
-                payload = SPS(nalu.rbsp, nalu.sodb_bit_len)
-                self.sps = payload
-            elif nalu.type == "PPS":
-                payload = PPS(nalu.rbsp, nalu.sodb_bit_len, self.sps)
-                self.pps = payload
+            if nalu.type == NALU_TYPE.SPS:
+                payload = SPS(nalu.header, nalu.rbsp, nalu.sodb_bit_len)
+                self.sps_list[payload.seq_parameter_set_id] = payload
+            elif nalu.type == NALU_TYPE.PPS:
+                payload = PPS(nalu.header, nalu.rbsp, nalu.sodb_bit_len, self.sps_list)
+                self.pps_list[payload.pic_parameter_set_id] = payload
+            elif nalu.type == NALU_TYPE.AUD:
+                payload = AUD(nalu.header, nalu.rbsp, nalu.sodb_bit_len)
+            elif nalu.type == NALU_TYPE.SEI:
+                pass
+            elif nalu.type == NALU_TYPE.IDR:
+                payload = IDR(
+                    nalu.header,
+                    nalu.rbsp,
+                    nalu.sodb_bit_len,
+                    self.sps_list,
+                    self.pps_list,
+                )
+            elif nalu.type == NALU_TYPE.non_IDR:
+                pass
 
             print(payload)
+            print("-" * 50)
 
             if self.cur_offset > 1000:
                 break
@@ -367,4 +527,3 @@ if __name__ == "__main__":
 
     h264 = H264(h264_file)
     h264.decode()
-
