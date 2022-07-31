@@ -5,6 +5,63 @@ from construct import *
 from bitstream import BitStream
 from numpy import uint8
 
+class SE_TYPE(enum.Enum):
+    MB_TYPE = auto()
+
+class Cabac:
+    def __init__(self, slice:Slice, se_type:SE_TYPE, stream:MyBitStream):
+        self.slice = slice
+        self.se_type = se_type
+        self.stream = stream
+
+
+    # 9.3.3.2 Arithmetic decoding process
+    def DecodeBin(self, bypassFlag, ctxIdx):
+        pass
+
+    def get_m_n(self, ctxIdx):
+        pass
+
+    # 9.3.3.1.1.3 Derivation process of ctxIdxInc for the syntax element mb_type
+    def Derivation_process_of_ctxIdxInc_for_the_syntax_element_mb_type(self, ctxIdxOffset):
+        pass
+
+    def Decode_mb_type_I_slice(self):
+        # Table 9-34 – Syntax elements and associated types of binarization, maxBinIdxCtx, and ctxIdxOffset
+        maxBinIdxCtx = 6
+        ctxIdxOffset = 3
+        bypassFlag = 0
+
+        # 参考 Table 9-39, 处理每一位的 binIdx
+
+        # 获取 binIdx = 0 的 binVal
+        ctxIdxInc = self.Derivation_process_of_ctxIdxInc_for_the_syntax_element_mb_type(ctxIdxOffset)
+        # 9.3.3.1 Derivation process for ctxIdx
+        ctxIdx = ctxIdxOffset + ctxIdxInc
+        binVal = self.DecodeBin(bypassFlag, ctxIdx)
+
+        # Table 9-36 – Binarization for macroblock types in I slices
+        if binVal == 0: # b(0)
+            return MB_TYPE_I.I_NxN  # Bin string: 0
+
+
+    def Decode_mb_type(self):
+        if self.slice.slice_type % 5 == SLICE_TYPE.I:
+            return self.Decode_mb_type_I_slice()
+
+
+    # 9.3.1.2 Initialization process for the arithmetic decoding engine
+    def Initialization_process_for_the_arithmetic_decoding_engine(self):
+        pass
+
+    # 9.3.1.1 Initialization process for context variables
+    def Initialization_process_for_context_variables(self):
+        pass
+
+    # 9.3 CABAC parsing process for slice data
+    def CABAC_parsing_process_for_slice_data(self):
+        if self.se_type == SE_TYPE.MB_TYPE:
+            return self.Decode_mb_type()
 
 class MyBitStream(BitStream):
     def __init__(self, data: bytes, bit_len):
@@ -17,6 +74,16 @@ class MyBitStream(BitStream):
 
     def more_data(self):
         return self._readed_bit < self.bit_len
+
+    def next_bits(self, n):
+        state = self.save()
+        ret = 0
+        while n > 0:
+            ret = ret << 1
+            ret |= self.read(bool)
+            n -= 1
+        self.restore(state)
+        return ret
 
     def read_bit(self):
         if not self.more_data():
@@ -58,8 +125,16 @@ class MyBitStream(BitStream):
         else:
             return ue >> 1
 
-    def read_ae(self):
-        # TODO: read_ae
+    def read_ae(self, slice, se_type):
+        cabac = Cabac(slice, se_type, self)
+        return cabac.CABAC_parsing_process_for_slice_data()
+
+    def read_me(self):
+        # TODO: read_me
+        pass
+
+    def read_te(self):
+        # TODO: read_te
         pass
 
 
@@ -205,7 +280,7 @@ class SPS(NALU_Payload):
         else:
             self.ChromaArrayType = self.chroma_format_idc
 
-        # SubWidthC 和 SubHeightC 代表 YUV 分量中, Y 分量和 UV 分量在水平和竖直方向上的比值
+        # SubWidthC 和 SubHeightC 代表 YUV 分量中, Y 分量和 UV(Chroma) 分量在水平和竖直方向上的比值
         if self.ChromaArrayType == 1:  # YUV420
             self.SubWidthC = 2
             self.SubHeightC = 2
@@ -216,8 +291,15 @@ class SPS(NALU_Payload):
             self.SubWidthC = 1
             self.SubHeightC = 1
         else:  # 单色或 YUV444 分离模式
-            self.SubWidthC = 1
-            self.SubHeightC = 1
+            pass
+
+        # 指定一个宏块(Macroblock) UV(Chroma) 分量的宽高
+        if self.ChromaArrayType != 0:
+            self.MbWidthC = 16 / self.SubWidthC
+            self.MbHeightC = 16 / self.SubHeightC
+        else:  # 单色或 YUV444 分离模式
+            self.MbWidthC = 0
+            self.MbHeightC = 0
 
         # 计算实际的宽高
         self.width = (self.pic_width_in_mbs_minus1 + 1) * 16
@@ -244,6 +326,9 @@ class SPS(NALU_Payload):
             self.height -= crop_unit_y * (
                 self.frame_crop_top_offset + self.frame_crop_bottom_offset
             )
+
+        self.BitDepth_y = 8 + self.bit_depth_luma_minus8
+        self.BitDepth_c = 8 + self.bit_depth_chroma_minus8
 
 
 class PPS(NALU_Payload):
@@ -350,6 +435,102 @@ class EndOfStream(NALU_Payload):
         super().__init__(nal_header, data, bit_len, "End of stream")
 
 
+class FillerData(NALU_Payload):
+    def __init__(self, nal_header, data, bit_len):
+        super().__init__(nal_header, data, bit_len, "Filler data")
+
+        self.ff_byte = b""
+        while self.stream.next_bits(8) == 0xFF:
+            self.ff_byte += self.stream.read_nbit(8).to_bytes(1, "big")
+
+
+class MB_TYPE_I(enum.IntEnum):
+    I_NxN = 0
+    I_16x16_0_0_0 = 1
+    I_16x16_1_0_0 = 2
+    I_16x16_2_0_0 = 3
+    I_16x16_3_0_0 = 4
+    I_16x16_0_1_0 = 5
+    I_16x16_1_1_0 = 6
+    I_16x16_2_1_0 = 7
+    I_16x16_3_1_0 = 8
+    I_16x16_0_2_0 = 9
+    I_16x16_1_2_0 = 10
+    I_16x16_2_2_0 = 11
+    I_16x16_3_2_0 = 12
+    I_16x16_0_0_1 = 13
+    I_16x16_1_0_1 = 14
+    I_16x16_2_0_1 = 15
+    I_16x16_3_0_1 = 16
+    I_16x16_0_1_1 = 17
+    I_16x16_1_1_1 = 18
+    I_16x16_2_1_1 = 19
+    I_16x16_3_1_1 = 20
+    I_16x16_0_2_1 = 21
+    I_16x16_1_2_1 = 22
+    I_16x16_2_2_1 = 23
+    I_16x16_3_2_1 = 24
+    I_PCM = 25
+
+
+class MB_TYPE_B(enum.IntEnum):
+    B_Direct_16x16 = 0
+    B_L0_16x16 = 1
+    B_L1_16x16 = 2
+    B_Bi_16x16 = 3
+    B_L0_L0_16x8 = 4
+    B_L0_L0_8x16 = 5
+    B_L1_L1_16x8 = 6
+    B_L1_L1_8x16 = 7
+    B_L0_L1_16x8 = 8
+    B_L0_L1_8x16 = 9
+    B_L1_L0_16x8 = 10
+    B_L1_L0_8x16 = 11
+    B_L0_Bi_16x8 = 12
+    B_L0_Bi_8x16 = 13
+    B_L1_Bi_16x8 = 14
+    B_L1_Bi_8x16 = 15
+    B_Bi_L0_16x8 = 16
+    B_Bi_L0_8x16 = 17
+    B_Bi_L1_16x8 = 18
+    B_Bi_L1_8x16 = 19
+    B_Bi_Bi_16x8 = 20
+    B_Bi_Bi_8x16 = 21
+    B_8x8 = 22
+    B_Skip = -1
+
+
+class MB_TYPE_P_SP(enum.IntEnum):
+    P_L0_16x16 = 0
+    P_L0_L0_16x8 = 1
+    P_L0_L0_8x16 = 2
+    P_8x8 = 3
+    P_8x8ref0 = 4
+    P_Skip = -1
+
+
+class MB_TYPE_SI(enum.IntEnum):
+    SI = 0
+
+
+class MB_PART_PRED_MODE(enum.IntEnum):
+    Intra_4x4 = 0
+    Intra_8x8 = 1
+    Intra_16x16 = 2
+    Pred_L0 = 3
+    Pred_L1 = 4
+    BiPred = 5
+    Direct = 6
+
+
+class SLICE_TYPE(enum.IntEnum):
+    P = 0
+    B = 1
+    I = 2
+    SP = 3
+    SI = 4
+
+
 class Slice(NALU_Payload):
     def __init__(self, nal_header, data, bit_len, type_name, sps_list, pps_list):
         super().__init__(nal_header, data, bit_len, type_name)
@@ -397,34 +578,38 @@ class Slice(NALU_Payload):
                 self.delta_pic_order_cnt.append(self.stream.read_se())
         if self.pps.redundant_pic_cnt_present_flag:
             self.redundant_pic_cnt = self.stream.read_ue()
-        if self.slice_type % 5 == 1:  # B帧
+        if self.slice_type % 5 == SLICE_TYPE.B:  # B帧
             self.direct_spatial_mv_pred_flag = self.stream.read_bit()
-        if self.slice_type % 5 in [0, 3, 1]:  # P帧, SP帧, B帧
+        if self.slice_type % 5 in [
+            SLICE_TYPE.P,
+            SLICE_TYPE.SP,
+            SLICE_TYPE.B,
+        ]:  # P帧, SP帧, B帧
             self.num_ref_idx_active_override_flag = self.stream.read_bit()
             if self.num_ref_idx_active_override_flag:
                 self.num_ref_idx_l0_active_minus1 = self.stream.read_ue()
-                if self.slice_type % 5 == 1:  # B帧
+                if self.slice_type % 5 == SLICE_TYPE.B:  # B帧
                     self.num_ref_idx_l1_active_minus1 = self.stream.read_ue()
         if self.nal_unit_type in [20, 21]:
             self.ref_pic_list_mvc_modification()  # specified in AnnexH
         else:
             self.ref_pic_list_modification()
         if self.pps.weighted_pred_flag and (
-            self.slice_type % 5 in [0, 3]
+            self.slice_type % 5 in [SLICE_TYPE.P, SLICE_TYPE.SP]
             or self.pps.weighted_bipred_idc == 1
-            and self.slice_type % 5 == 1
+            and self.slice_type % 5 == SLICE_TYPE.B
         ):
             self.pred_weight_table()
         if self.nal_ref_idc != 0:
             self.dec_ref_pic_marking()
         if self.pps.entropy_coding_mode_flag and self.slice_type % 5 not in [
-            2,
-            4,
-        ]:  # I, SI
+            SLICE_TYPE.I,  # I
+            SLICE_TYPE.SI,  # SI
+        ]:
             self.cabac_init_idc = self.stream.read_ue()
         self.slice_qp_delta = self.stream.read_se()
-        if self.slice_type % 5 in [3, 4]:  # SP, SI
-            if self.slice_type % 5 == 3:  # SP
+        if self.slice_type % 5 in [SLICE_TYPE.SP, SLICE_TYPE.SI]:  # SP, SI
+            if self.slice_type % 5 == SLICE_TYPE.SP:  # SP
                 self.sp_for_switch_flag = self.stream.read_bit()
             self.slice_qs_delta = self.stream.read_se()
         if self.pps.deblocking_filter_control_present_flag:
@@ -448,23 +633,457 @@ class Slice(NALU_Payload):
         # TODO: NextMbAddress
         pass
 
-    def macroblock_layer(self):
-        # TODO: macroblock_layer
+    def MbPartPredMode(self, mb_type, zero_or_one):
+        if self.slice_type % 5 == SLICE_TYPE.I:
+            if mb_type == MB_TYPE_I.I_NxN:
+                if self.pps.transform_8x8_mode_flag == 0:
+                    return MB_PART_PRED_MODE.Intra_4x4
+                elif self.pps.transform_8x8_mode_flag == 1:
+                    return MB_PART_PRED_MODE.Intra_8x8
+            elif mb_type == MB_TYPE_I.I_PCM:
+                return None
+            else:
+                return MB_PART_PRED_MODE.Intra_16x16
+
+        elif self.slice_type % 5 in [SLICE_TYPE.P, SLICE_TYPE.SP]:
+            if zero_or_one == 0:
+                if mb_type in [
+                    MB_TYPE_P_SP.P_L0_16x16,
+                    MB_TYPE_P_SP.P_L0_L0_16x8,
+                    MB_TYPE_P_SP.P_L0_L0_8x16,
+                    MB_TYPE_P_SP.P_Skip,
+                ]:
+                    return MB_PART_PRED_MODE.Pred_L0
+                else:
+                    return None
+            elif zero_or_one == 1:
+                if mb_type in [MB_TYPE_P_SP.P_L0_L0_16x8, MB_TYPE_P_SP.P_L0_L0_8x16]:
+                    return MB_PART_PRED_MODE.Pred_L0
+                else:
+                    return None
+
+        elif self.slice_type % 5 == SLICE_TYPE.B:
+            if zero_or_one == 0:
+                if mb_type in [MB_TYPE_B.B_Direct_16x16, MB_TYPE_B.B_Skip]:
+                    return MB_PART_PRED_MODE.Direct
+                elif mb_type in [
+                    MB_TYPE_B.B_L0_16x16,
+                    MB_TYPE_B.B_L0_L0_16x8,
+                    MB_TYPE_B.B_L0_L0_8x16,
+                    MB_TYPE_B.B_L0_L1_16x8,
+                    MB_TYPE_B.B_L0_L1_8x16,
+                    MB_TYPE_B.B_L0_Bi_16x8,
+                    MB_TYPE_B.B_L0_Bi_8x16,
+                ]:
+                    return MB_PART_PRED_MODE.Pred_L0
+                elif mb_type in [
+                    MB_TYPE_B.B_L1_16x16,
+                    MB_TYPE_B.B_L1_L1_16x8,
+                    MB_TYPE_B.B_L1_L1_8x16,
+                    MB_TYPE_B.B_L1_L0_16x8,
+                    MB_TYPE_B.B_L1_L0_8x16,
+                    MB_TYPE_B.B_L1_Bi_16x8,
+                    MB_TYPE_B.B_L1_Bi_8x16,
+                ]:
+                    return MB_PART_PRED_MODE.Pred_L1
+                elif mb_type == MB_TYPE_B.B_8x8:
+                    return None
+                else:
+                    return MB_PART_PRED_MODE.BiPred
+            if zero_or_one == 1:
+                if mb_type in [
+                    MB_TYPE_B.B_Direct_16x16,
+                    MB_TYPE_B.B_L0_16x16,
+                    MB_TYPE_B.B_L1_16x16,
+                    MB_TYPE_B.B_Bi_16x16,
+                    MB_TYPE_B.B_8x8,
+                    MB_TYPE_B.B_Skip,
+                ]:
+                    return None
+                elif mb_type in [
+                    MB_TYPE_B.B_L0_L0_16x8,
+                    MB_TYPE_B.B_L0_L0_8x16,
+                    MB_TYPE_B.B_L1_L0_16x8,
+                    MB_TYPE_B.B_L1_L0_8x16,
+                    MB_TYPE_B.B_Bi_L0_16x8,
+                    MB_TYPE_B.B_Bi_L0_8x16,
+                    MB_TYPE_B.B_L1_Bi_8x16,
+                ]:
+                    return MB_PART_PRED_MODE.Pred_L0
+                elif mb_type in [
+                    MB_TYPE_B.B_L1_L1_16x8,
+                    MB_TYPE_B.B_L1_L1_8x16,
+                    MB_TYPE_B.B_L0_L1_16x8,
+                    MB_TYPE_B.B_L0_L1_8x16,
+                    MB_TYPE_B.B_Bi_L1_16x8,
+                    MB_TYPE_B.B_Bi_L1_8x16,
+                ]:
+                    return MB_PART_PRED_MODE.Pred_L1
+                else:
+                    return MB_PART_PRED_MODE.BiPred
+
+        if self.slice_type % 5 == SLICE_TYPE.SI:
+            if mb_type == MB_TYPE_SI.SI:
+                return MB_PART_PRED_MODE.Intra_4x4
+
+    def NumMbPart(self, mb_type):
+        if self.slice_type % 5 in [SLICE_TYPE.P, SLICE_TYPE.SP]:
+            if mb_type in [MB_TYPE_P_SP.P_L0_16x16, MB_TYPE_P_SP.P_Skip]:
+                return 1
+            elif mb_type in [MB_TYPE_P_SP.P_L0_L0_16x8, MB_TYPE_P_SP.P_L0_16x16]:
+                return 2
+            else:
+                return 4
+
+        if self.slice_type % 5 in [SLICE_TYPE.B]:
+            if mb_type in [MB_TYPE_B.B_Direct_16x16, MB_TYPE_B.B_Skip]:
+                return None
+            elif mb_type in [
+                MB_TYPE_B.B_L0_16x16,
+                MB_TYPE_B.B_L1_16x16,
+                MB_TYPE_B.B_Bi_16x16,
+            ]:
+                return 1
+            elif mb_type in [MB_TYPE_B.B_8x8]:
+                return 4
+            else:
+                return 2
+
+    def mb_pred(self, mb_type):
+        if self.MbPartPredMode(mb_type, 0) in [
+            MB_PART_PRED_MODE.Intra_4x4,
+            MB_PART_PRED_MODE.Intra_8x8,
+            MB_PART_PRED_MODE.Intra_16x16,
+        ]:
+            if self.MbPartPredMode(mb_type, 0) == MB_PART_PRED_MODE.Intra_4x4:
+                self.prev_intra4x4_pred_mode_flag = []
+                self.rem_intra4x4_pred_mode = []
+                for luma4x4BlkIdx in range(16):
+                    self.prev_intra4x4_pred_mode_flag.append(
+                        self.stream.read_ae()
+                        if self.pps.entropy_coding_mode_flag
+                        else self.stream.read_bit()
+                    )
+                    if not self.prev_intra4x4_pred_mode_flag[luma4x4BlkIdx]:
+                        self.rem_intra4x4_pred_mode.append(
+                            self.stream.read_ae()
+                            if self.pps.entropy_coding_mode_flag
+                            else self.stream.read_nbit(3)
+                        )
+            if self.MbPartPredMode(mb_type, 0) == MB_PART_PRED_MODE.Intra_8x8:
+                self.prev_intra8x8_pred_mode_flag = []
+                self.rem_intra8x8_pred_mode = []
+                for luma8x8BlkIdx in range(16):
+                    self.prev_intra8x8_pred_mode_flag.append(
+                        self.stream.read_ae()
+                        if self.pps.entropy_coding_mode_flag
+                        else self.stream.read_bit()
+                    )
+                    if not self.prev_intra8x8_pred_mode_flag[luma8x8BlkIdx]:
+                        self.rem_intra8x8_pred_mode.append(
+                            self.stream.read_ae()
+                            if self.pps.entropy_coding_mode_flag
+                            else self.stream.read_nbit(3)
+                        )
+            if self.sps.ChromaArrayType in [1, 2]:
+                self.intra_chroma_pred_mode = (
+                    self.stream.read_ae()
+                    if self.pps.entropy_coding_mode_mode
+                    else self.stream.read_ue()
+                )
+        elif self.MbPartPredMode(mb_type, 0) != MB_PART_PRED_MODE.Direct:
+            self.ref_idx_l0 = []
+            for mbPartIdx in range(self.NumMbPart(mb_type)):
+                if (
+                    (
+                        self.num_ref_idx_l0_active_minus1 > 0
+                        or self.mb_field_decoding_flag != self.field_pic_flag
+                    )
+                    and self.MbPartPredMode(mb_type, mbPartIdx)
+                    != MB_PART_PRED_MODE.Pred_L1
+                ):
+                    self.ref_idx_l0.append(
+                        self.stream.read_ae()
+                        if self.pps.entropy_coding_mode_flag
+                        else self.stream.read_te()
+                    )
+            self.ref_idx_l1 = []
+            for mbPartIdx in range(self.NumMbPart(mb_type)):
+                if (
+                    (
+                        self.num_ref_idx_l1_active_minus1 > 0
+                        or self.mb_field_decoding_flag != self.field_pic_flag
+                    )
+                    and self.MbPartPredMode(mb_type, mbPartIdx)
+                    != MB_PART_PRED_MODE.Pred_L0
+                ):
+                    self.ref_idx_l1.append(
+                        self.stream.read_ae()
+                        if self.pps.entropy_coding_mode_flag
+                        else self.stream.read_te()
+                    )
+            self.mvd_l0 = []
+            for mbPartIdx in range(self.NumMbPart(mb_type)):
+                if self.MbPartPredMode(mb_type, mbPartIdx) != MB_PART_PRED_MODE.Pred_L1:
+                    self.mvd_l0.append([[]])
+                    for compIdx in range(2):
+                        self.mvd_l0[mbPartIdx][0].append(
+                            self.stream.read_ae()
+                            if self.pps.entropy_coding_mode_flag
+                            else self.stream.read_se()
+                        )
+            self.mvd_l1 = []
+            for mbPartIdx in range(self.NumMbPart(mb_type)):
+                if self.MbPartPredMode(mb_type, mbPartIdx) != MB_PART_PRED_MODE.Pred_L0:
+                    self.mvd_l1.append([[]])
+                    for compIdx in range(2):
+                        self.mvd_l1[mbPartIdx][0].append(
+                            self.stream.read_ae()
+                            if self.pps.entropy_coding_mode_flag
+                            else self.stream.read_se()
+                        )
+
+    def sub_mb_pred(self, mb_type):
+        # TODO: sub_mb_pred
         pass
+
+    def residual_block_cavlc(self, startIdx, endIdx, maxNumCoeff):
+        pass
+
+    def residual_block_cabac(self, startIdx, endIdx, maxNumCoeff):
+        coeffLevel = []
+        if maxNumCoeff != 64 or self.sps.ChromaArrayType == 3:
+            self.coded_block_flag = self.stream.read_ae()
+        for i in range(maxNumCoeff):
+            coeffLevel.append(0)
+        if self.coded_block_flag:
+            numCoeff = endIdx + 1
+            i = startIdx
+            self.significant_coeff_flag = []
+            self.last_significant_coeff_flag = []
+            while i < numCoeff - 1:
+                self.significant_coeff_flag.append(self.stream.read_ae())
+                if self.significant_coeff_flag[i]:
+                    self.last_significant_coeff_flag.append(self.stream.read_ae())
+                    if self.last_significant_coeff_flag[i]:
+                        numCoeff = i + 1
+                i += 1
+            self.coeff_abs_level_minus1 = [0 for i in range(numCoeff)]
+            self.coeff_abs_level_minus1[-1] = self.stream.read_ae()
+            self.coeff_sign_flag = [0 for i in range(numCoeff)]
+            self.coeff_sign_flag[-1] = self.stream.read_ae()
+            coeffLevel[numCoeff - 1] = (
+                self.coeff_abs_level_minus1[numCoeff - 1] + 1
+            ) * (1 - 2 * self.coeff_sign_flag[numCoeff - 1])
+            for i in range(numCoeff - 2, startIdx - 1, -1):
+                if self.significant_coeff_flag[i]:
+                    self.coeff_abs_level_minus1[i] = self.stream.read_ae()
+                    self.coeff_sign_flag[i] = self.stream.read_ae()
+                    coeffLevel[i] = (self.coeff_abs_level_minus1[i] + 1) * (
+                        1 - 2 * self.coeff_sign_flag[i]
+                    )
+
+    def residual_luma(self, startIdx, endIdx):
+        i16x16DClevel = []
+        i16x16AClevel = []
+        level4x4 = []
+        level8x8 = []
+        if (
+            startIdx == 0
+            and self.MbPartPredMode(self.mb_type, 0) == MB_PART_PRED_MODE.Intra_16x16
+        ):
+            i16x16DClevel = self.residual_block(0, 15, 16)
+        for i8x8 in range(4):
+            if (
+                not self.pps.transform_8x8_mode_flag
+                or not self.pps.entropy_coding_mode_flag
+            ):
+                temp_8x8 = [0 for i in range(64)]
+                for i4x4 in range(4):
+                    if self.CodedBlockPatternLuma & (1 << i8x8):
+                        if (
+                            self.MbPartPredMode(self.mb_type, 0)
+                            == MB_PART_PRED_MODE.Intra_16x16
+                        ):
+                            i16x16AClevel.append(
+                                self.residual_block(
+                                    max(0, startIdx - 1, endIdx - 1, 15)
+                                )
+                            )
+                        else:
+                            level4x4.append(self.residual_block(startIdx, endIdx, 16))
+                    elif (
+                        self.MbPartPredMode(self.mb_type, 0)
+                        == MB_PART_PRED_MODE.Intra_16x16
+                    ):
+                        temp = []
+                        for i in range(15):
+                            temp.append(0)
+                        i16x16AClevel.append(temp)
+                    else:
+                        temp = []
+                        for i in range(16):
+                            temp.append(0)
+                        level4x4.append(temp)
+                    if (
+                        not self.pps.entropy_coding_mode_flag
+                        and self.pps.transform_8x8_mode_flag
+                    ):
+                        for i in range(16):
+                            temp_8x8[4 * i + i4x4] = level4x4[i8x8 * 4 + i4x4][i]
+                level8x8.append(temp_8x8)
+            elif self.CodedBlockPatternLuma & (1 << i8x8):
+                level8x8.append(self.residual_block(4 * startIdx, 4 * endIdx + 3, 64))
+            else:
+                temp = []
+                for i in range(64):
+                    temp.append(0)
+                level8x8.append(temp)
+
+        return i16x16DClevel, i16x16AClevel, level4x4, level8x8
+
+    def residual(self, startIdx, endIdx):
+        if not self.pps.entropy_coding_mode_flag:
+            self.residual_block = self.residual_block_cavlc
+        else:
+            self.residual_block = self.residual_block_cabac
+        (
+            self.Intra16x16DCLevel,
+            self.Intra16x16ACLevel,
+            self.LumaLevel4x4,
+            self.LumaLevel8x8,
+        ) = self.residual_luma(startIdx, endIdx)
+        if self.sps.ChromaArrayType in [1, 2]:
+            NumC8x8 = 4 // (self.sps.SubWidthC * self.sps.SubHeightC)
+            self.ChromaDCLevel = []
+            for iCbCr in range(2):
+                if (self.CodedBlockPatternChroma & 3) and startIdx == 0:
+                    self.ChromaDCLevel.append(
+                        (self.residual_block(0, 4 * NumC8x8 - 1, 4 * NumC8x8))
+                    )
+                else:
+                    temp = []
+                    for i in range(4 * NumC8x8):
+                        temp.append(0)
+                    self.ChromaDCLevel.append(temp)
+            self.ChromaACLevel = []
+            for iCbCr in range(2):
+                self.ChromaACLevel.append([])
+                for i8x8 in range(NumC8x8):
+                    for i4x4 in range(4):
+                        if self.CodedBlockPatternChroma & 2:
+                            self.ChromaACLevel[iCbCr].append(
+                                (
+                                    self.residual_block(
+                                        max(0, startIdx - 1), endIdx - 1, 15
+                                    )
+                                )
+                            )
+                        else:
+                            temp = []
+                            for i in range(15):
+                                temp.append(0)
+                            self.ChromaACLevel[iCbCr].append(temp)
+        elif self.sps.ChromaArrayType == 3:
+            (
+                self.CbIntra16x16DCLevel,
+                self.CbIntra16x16ACLevel,
+                self.CbLevel4x4,
+                self.CbLevel8x8,
+            ) = self.residual_luma(startIdx, endIdx)
+            (
+                self.CrIntra16x16DCLevel,
+                self.CrIntra16x16ACLevel,
+                self.CrLevel4x4,
+                self.CrLevel8x8,
+            ) = self.residual_luma(startIdx, endIdx)
+
+    def macroblock_layer(self):
+        self.mb_type = (
+            self.stream.read_ae()
+            if self.pps.entropy_coding_mode_flag
+            else self.stream.read_ue()
+        )
+        if self.mb_type == MB_TYPE_I.I_PCM:
+            self.pcm_alignment_zero_bit = []
+            while not self.stream.byte_aligned():
+                self.pcm_alignment_zero_bit.append(self.stream.read_bit())
+            self.pcm_sample_luma = []
+            for i in range(256):
+                self.pcm_sample_luma.append(self.stream.read_nbit(self.sps.BitDepth_y))
+            self.pcm_sample_chroma = []
+            for i in range(2 * self.sps.MbWidthC * sps.MbHeightC):
+                self.pcm_sample_chroma.append(
+                    self.stream.read_nbit(self.sps.BitDepth_c)
+                )
+        else:
+            noSubMbPartSizeLessThan8x8Flag = 1
+            if (
+                self.mb_type != MB_TYPE_I.I_NxN
+                and self.MbPartPredMode_I(self.mb_type, 0)
+                != MB_PART_PRED_MODE.Intra_16x16
+                and self.NumMbPart(self.mb_type) == 4
+            ):
+                # TODO: sub_mb_pred(mb_type)
+                pass
+            else:
+                if self.pps.transform_8x8_mode_flag and self.mb_type == MB_TYPE_I.I_NxN:
+                    self.transform_size_8x8_flag = (
+                        self.stream.read_ae()
+                        if self.pps.entropy_coding_mode_flag
+                        else self.stream.read_bit()
+                    )
+                self.mb_pred(mb_type)
+            if self.MbPartPredMode(self.mb_type, 0) != MB_PART_PRED_MODE.Intra_16x16:
+                self.coded_block_pattern = (
+                    self.stream.read_ae()
+                    if self.pps.entropy_coding_mode_flag
+                    else self.stream.read_me()
+                )
+                self.CodedBlockPatternLuma = self.coded_block_pattern % 16
+                self.CodedBlockPatternChroma = self.coded_block_pattern // 16
+                if (
+                    self.CodedBlockPatternLuma > 0
+                    and self.pps.transform_8x8_mode_flag
+                    and self.mb_type != MB_TYPE_I.I_NxN
+                    and noSubMbPartSizeLessThan8x8Flag
+                    and (
+                        self.mb_type != MB_TYPE_B.B_Direct_16x16
+                        or self.sps.direct_8x8_inference_flag
+                    )
+                ):
+                    self.transform_size_8x8_flag = (
+                        self.stream.read_ae()
+                        if self.pps.entropy_coding_mode_flag
+                        else self.stream.read_bit()
+                    )
+                if (
+                    self.CodedBlockPatternLuma > 0
+                    or self.CodedBlockPatternChroma > 0
+                    or self.MbPartPredMode(mb_type, 0) == MB_PART_PRED_MODE.Intra_16x16
+                ):
+                    self.mb_qp_delta = (
+                        self.stream.read_ae()
+                        if self.pps.entropy_coding_mode_flag
+                        else self.stream.read_se()
+                    )
+                    self.residual(0, 15)
 
     def slice_data(self):
         if self.pps.entropy_coding_mode_flag:
             self.cabac_alignment_one_bit = []
             while not self.stream.byte_aligned():
                 self.cabac_alignment_one_bit.append(self.stream.read_bit())
+        # 该宏块是否为自适应编码
         MbaffFrameFlag = (
             self.sps.mb_adaptive_frame_field_flag and not self.field_pic_flag
         )
+        # 当前宏块在宏块序列中的索引
         CurrMbAddr = self.first_mb_in_slice * (1 + MbaffFrameFlag)
         moreDataFlag = 1
         prevMbSkipped = 0
         while True:
-            if self.slice_type % 5 not in [2, 4]:  # I, SI
+            if self.slice_type % 5 not in [SLICE_TYPE.I, SLICE_TYPE.SI]:  # I, SI
                 if not self.pps.entropy_coding_mode_flag:
                     self.mb_skip_run = self.stream.read_ue()
                     prevMbSkipped = self.mb_skip_run > 0
@@ -488,7 +1107,7 @@ class Slice(NALU_Payload):
             if not self.pps.entropy_coding_mode_flag:
                 moreDataFlag = self.stream.more_data()
             else:
-                if self.slice_type % 5 not in [2, 4]: # I, SI
+                if self.slice_type % 5 not in [SLICE_TYPE.I, SLICE_TYPE.SI]:  # I, SI
                     prevMbSkipped = self.mb_skip_flag
                 if MbaffFrameFlag and CurrMbAddr % 2 == 0:
                     moreDataFlag = 1
@@ -649,6 +1268,8 @@ class H264:
                 payload = EndOfSeq(nalu.header, nalu.rbsp, nalu.sodb_bit_len)
             elif nalu.type == NALU_TYPE.end_of_stream:
                 payload = EndOfStream(nalu.header, nalu.rbsp, nalu.sodb_bit_len)
+            elif nalu.type == NALU_TYPE.filler_data:
+                payload = FillerData(nalu.header, nalu.rbsp, nalu.sodb_bit_len)
 
             print(payload)
             print("-" * 50)
