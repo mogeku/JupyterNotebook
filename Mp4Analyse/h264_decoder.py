@@ -6,10 +6,10 @@ from bitstream import BitStream
 from numpy import uint8
 
 class SE_TYPE(enum.Enum):
-    MB_TYPE = auto()
+    MB_TYPE = enum.auto()
 
 class Cabac:
-    def __init__(self, slice:Slice, se_type:SE_TYPE, stream:MyBitStream):
+    def __init__(self, slice, se_type:SE_TYPE, stream):
         self.slice = slice
         self.se_type = se_type
         self.stream = stream
@@ -1281,7 +1281,8 @@ class H264:
 if __name__ == "__main__":
     print(os.path.abspath(os.curdir))
 
-    h264_file = "./data/data1.h264"
+    # h264_file = "./data/data1.h264"
+    h264_file = r"D:\Project\work\git\mp4repair\temp\out.h264"
 
     h264 = H264(h264_file)
     h264.decode()
