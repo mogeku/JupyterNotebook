@@ -82,8 +82,8 @@ TAG = {
     435: 'T82Options',
     437: 'JPEGTables',  # 37
     512: 'JPEGProc',
-    513: 'JPEGInterchangeFormat',
-    514: 'JPEGInterchangeFormatLength',
+    513: 'JPEGFromRawStart',
+    514: 'JPEGFromRawLength',
     515: 'JPEGRestartInterval',
     517: 'JPEGLosslessPredictors',
     518: 'JPEGPointTransforms',
