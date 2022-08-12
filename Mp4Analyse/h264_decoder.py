@@ -1282,7 +1282,8 @@ if __name__ == "__main__":
     print(os.path.abspath(os.curdir))
 
     # h264_file = "./data/data1.h264"
-    h264_file = r"D:\Project\work\git\mp4repair\temp\out.h264"
+    # h264_file = r"D:\Project\work\git\mp4repair\temp\out.h264"
+    h264_file = r"D:\Users\Desktop\hero8.h264"
 
     h264 = H264(h264_file)
     h264.decode()
